@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manga Translator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1>Manga Translator</h1>
+    <div class="sub">PaddleOCR detection, manga-ocr recognition, Nemotron translation</div>
+  </div>
+  <div class="sub" id="health-summary">checking backend...</div>
+</header>
+
+<main>
+  <div id="banner" class="banner hidden"></div>
+
+  <div class="card" id="upload-card">
+    <h2>Translate pages</h2>
+    <div class="row">
+      <div>
+        <label for="files">Page images</label>
+        <input type="file" id="files" accept="image/png,image/jpeg,image/webp,image/bmp" multiple>
+      </div>
+      <div>
+        <label for="lang">Source language</label>
+        <select id="lang">
+          <option value="ja">Japanese</option>
+          <option value="zh">Chinese</option>
+        </select>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="submit">Translate</button>
+      <span class="sub" id="file-summary">no files selected</span>
+    </div>
+  </div>
+
+  <div class="card hidden" id="progress-card">
+    <h2>Batch progress</h2>
+    <div class="bar"><div id="bar-fill"></div></div>
+    <div class="status-line" id="progress-text">queued</div>
+    <table id="page-table">
+      <thead>
+        <tr><th>#</th><th>File</th><th>Status</th><th>Regions</th><th>Time</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <div class="actions">
+      <button id="open-reader" disabled>Open reader</button>
+      <button class="secondary" id="download" disabled>Download zip</button>
+      <button class="secondary" id="discard">Discard batch</button>
+    </div>
+  </div>
+</main>
+
+<script src="app.js"></script>
+<script>
+const filesInput = document.getElementById("files");
+const langSelect = document.getElementById("lang");
+const submitButton = document.getElementById("submit");
+const fileSummary = document.getElementById("file-summary");
+const banner = document.getElementById("banner");
+const progressCard = document.getElementById("progress-card");
+const progressText = document.getElementById("progress-text");
+const barFill = document.getElementById("bar-fill");
+const tableBody = document.querySelector("#page-table tbody");
+const openReaderButton = document.getElementById("open-reader");
+const downloadButton = document.getElementById("download");
+const discardButton = document.getElementById("discard");
+const healthSummary = document.getElementById("health-summary");
+
+let currentBatchId = null;
+let pollTimer = null;
+
+function showBanner(kind, message) {
+  banner.className = "banner " + kind;
+  banner.textContent = message;
+}
+
+function hideBanner() {
+  banner.className = "banner hidden";
+}
+
+filesInput.addEventListener("change", function () {
+  const count = filesInput.files.length;
+  fileSummary.textContent = count === 0 ? "no files selected"
+    : count + (count === 1 ? " file selected" : " files selected");
+});
+
+submitButton.addEventListener("click", async function () {
+  const files = Array.from(filesInput.files);
+  if (files.length === 0) {
+    showBanner("warn", "Select at least one image first.");
+    return;
+  }
+  hideBanner();
+  submitButton.disabled = true;
+  submitButton.textContent = "Submitting...";
+
+  try {
+    const result = await submitBatch(files, langSelect.value);
+    currentBatchId = result.batch_id;
+    progressCard.classList.remove("hidden");
+    startPolling();
+  } catch (err) {
+    showBanner("error", "Submit failed: " + err.message);
+  } finally {
+    submitButton.disabled = false;
+    submitButton.textContent = "Translate";
+  }
+});
+
+function startPolling() {
+  stopPolling();
+  poll();
+  pollTimer = setInterval(poll, 1000);
+}
+
+function stopPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = null;
+}
+
+async function poll() {
+  if (!currentBatchId) return;
+  let batch;
+  try {
+    batch = await getBatch(currentBatchId);
+  } catch (err) {
+    stopPolling();
+    showBanner("error", "Lost the batch: " + err.message);
+    return;
+  }
+
+  render(batch);
+
+  if (batch.status === "done") {
+    stopPolling();
+    if (batch.failed > 0 && batch.completed === 0) {
+      showBanner("error", "Every page failed. See the table for details.");
+    } else if (batch.failed > 0) {
+      showBanner("warn", batch.failed + " of " + batch.total + " pages failed.");
+    }
+  }
+}
+
+function render(batch) {
+  const finished = batch.completed + batch.failed;
+  const percent = batch.total ? Math.round((finished / batch.total) * 100) : 0;
+  barFill.style.width = percent + "%";
+  progressText.textContent =
+    finished + " / " + batch.total + " pages processed" +
+    (batch.failed ? " (" + batch.failed + " failed)" : "") +
+    " - batch " + batch.status;
+
+  tableBody.innerHTML = "";
+  for (const page of batch.pages) {
+    const row = document.createElement("tr");
+    row.innerHTML =
+      "<td>" + (page.index + 1) + "</td>" +
+      "<td>" + escapeHtml(page.filename) + "</td>" +
+      '<td><span class="pill ' + page.status + '">' + page.status + "</span>" +
+      (page.error ? '<div class="sub">' + escapeHtml(page.error) + "</div>" : "") + "</td>" +
+      "<td>" + (page.status === "done" ? page.region_count : "-") + "</td>" +
+      "<td>" + (page.duration_seconds != null ? page.duration_seconds + "s" : "-") + "</td>";
+    tableBody.appendChild(row);
+  }
+
+  const hasCompleted = batch.completed > 0;
+  openReaderButton.disabled = !hasCompleted;
+  downloadButton.disabled = !hasCompleted;
+}
+
+openReaderButton.addEventListener("click", function () {
+  if (currentBatchId) window.location.href = readerUrl(currentBatchId);
+});
+
+downloadButton.addEventListener("click", function () {
+  if (currentBatchId) window.location.href = batchDownloadUrl(currentBatchId);
+});
+
+discardButton.addEventListener("click", async function () {
+  if (!currentBatchId) return;
+  stopPolling();
+  try {
+    await deleteBatch(currentBatchId);
+    showBanner("info", "Batch discarded.");
+  } catch (err) {
+    showBanner("error", "Discard failed: " + err.message);
+  }
+  currentBatchId = null;
+  progressCard.classList.add("hidden");
+});
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+(async function checkHealth() {
+  try {
+    const health = await getHealth();
+    const bits = ["backend ok", "pipeline: " + health.pipeline_mode];
+    if (!health.translation_api_key_configured) bits.push("no translation key");
+    healthSummary.textContent = bits.join(" | ");
+    if (health.pipeline_mode === "stub") {
+      showBanner("warn", "Backend is running the stub pipeline. No real detection or translation is performed.");
+    } else if (!health.translation_api_key_configured) {
+      showBanner("warn", "NVIDIA_API_KEY is not configured on the backend. Translation calls will fail.");
+    }
+  } catch (err) {
+    healthSummary.textContent = "backend unreachable";
+    showBanner("error", "Cannot reach the backend: " + err.message);
+  }
+})();
+</script>
+</body>
+</html>

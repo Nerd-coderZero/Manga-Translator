@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reader - Manga Translator</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div>
+    <h1>Reader</h1>
+    <div class="sub" id="batch-label">loading batch...</div>
+  </div>
+  <div class="actions" style="margin:0">
+    <button class="secondary" id="back">Back to upload</button>
+    <button class="secondary" id="download">Download zip</button>
+  </div>
+</header>
+
+<main>
+  <div id="banner" class="banner hidden"></div>
+
+  <div class="reader-wrap">
+    <div>
+      <div class="page-stage" id="stage">
+        <div class="sub" id="stage-message">no page loaded</div>
+      </div>
+      <div class="nav">
+        <button class="secondary" id="prev">Previous</button>
+        <div class="counter" id="counter">- / -</div>
+        <button class="secondary" id="next">Next</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="card">
+        <h2>Regions</h2>
+        <div class="sub" id="region-summary">-</div>
+        <div class="regions" id="regions"></div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script src="app.js"></script>
+<script>
+const params = new URLSearchParams(window.location.search);
+const batchId = params.get("batch");
+
+const banner = document.getElementById("banner");
+const stage = document.getElementById("stage");
+const stageMessage = document.getElementById("stage-message");
+const counter = document.getElementById("counter");
+const regionsEl = document.getElementById("regions");
+const regionSummary = document.getElementById("region-summary");
+const batchLabel = document.getElementById("batch-label");
+const prevButton = document.getElementById("prev");
+const nextButton = document.getElementById("next");
+
+let readablePages = [];
+let position = 0;
+const pageCache = new Map();
+
+function showBanner(kind, message) {
+  banner.className = "banner " + kind;
+  banner.textContent = message;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+document.getElementById("back").addEventListener("click", function () {
+  const api = params.get("api");
+  window.location.href = "index.html" + (api ? "?api=" + encodeURIComponent(api) : "");
+});
+
+document.getElementById("download").addEventListener("click", function () {
+  if (batchId) window.location.href = batchDownloadUrl(batchId);
+});
+
+prevButton.addEventListener("click", function () { move(-1); });
+nextButton.addEventListener("click", function () { move(1); });
+
+document.addEventListener("keydown", function (event) {
+  if (event.key === "ArrowLeft") move(-1);
+  if (event.key === "ArrowRight") move(1);
+});
+
+function move(delta) {
+  const next = position + delta;
+  if (next < 0 || next >= readablePages.length) return;
+  position = next;
+  showPage();
+}
+
+async function showPage() {
+  const page = readablePages[position];
+  counter.textContent = (position + 1) + " / " + readablePages.length;
+  prevButton.disabled = position === 0;
+  nextButton.disabled = position >= readablePages.length - 1;
+
+  let detail = pageCache.get(page.index);
+  if (!detail) {
+    stageMessage.textContent = "loading page " + (page.index + 1) + "...";
+    try {
+      detail = await getBatchPage(batchId, page.index);
+      pageCache.set(page.index, detail);
+    } catch (err) {
+      showBanner("error", "Could not load page " + (page.index + 1) + ": " + err.message);
+      return;
+    }
+  }
+
+  stage.innerHTML = "";
+  const img = document.createElement("img");
+  img.alt = detail.filename;
+  img.src = resolveImageUrl(detail.image_url);
+  img.addEventListener("error", function () {
+    stage.innerHTML = '<div class="sub">image failed to load</div>';
+  });
+  stage.appendChild(img);
+
+  renderRegions(detail);
+  prefetch(position + 1);
+}
+
+function renderRegions(detail) {
+  const regions = detail.regions || [];
+  regionSummary.textContent =
+    detail.filename + " - " + regions.length + (regions.length === 1 ? " region" : " regions") +
+    (detail.duration_seconds != null ? " - " + detail.duration_seconds + "s" : "");
+
+  regionsEl.innerHTML = "";
+  if (regions.length === 0) {
+    regionsEl.innerHTML = '<div class="sub">no text regions detected on this page</div>';
+    return;
+  }
+  regions.forEach(function (region, i) {
+    const box = document.createElement("div");
+    box.className = "region";
+    const bounds = region.bounds || [0, 0, 0, 0];
+    box.innerHTML =
+      '<div class="src">' + (i + 1) + ". " + escapeHtml(region.source_text || "(empty)") + "</div>" +
+      '<div class="dst">' + escapeHtml(region.translation || "(not translated)") + "</div>" +
+      '<div class="bounds">[' + bounds.join(", ") + "]</div>";
+    regionsEl.appendChild(box);
+  });
+}
+
+async function prefetch(index) {
+  const page = readablePages[index];
+  if (!page || pageCache.has(page.index)) return;
+  try {
+    const detail = await getBatchPage(batchId, page.index);
+    pageCache.set(page.index, detail);
+    const img = new Image();
+    img.src = resolveImageUrl(detail.image_url);
+  } catch (err) {
+    // prefetch is best effort; a failure here is retried on navigation
+  }
+}
+
+(async function init() {
+  if (!batchId) {
+    showBanner("error", "No batch specified. Open the reader from the upload page.");
+    batchLabel.textContent = "no batch";
+    return;
+  }
+
+  let batch;
+  try {
+    batch = await getBatch(batchId);
+  } catch (err) {
+    showBanner("error", "Could not load batch: " + err.message);
+    batchLabel.textContent = "batch unavailable";
+    return;
+  }
+
+  batchLabel.textContent =
+    "batch " + batch.batch_id.slice(0, 8) + " - " + batch.source_lang +
+    " - " + batch.completed + " of " + batch.total + " pages ready";
+
+  readablePages = batch.pages.filter(function (p) { return p.status === "done"; });
+
+  if (readablePages.length === 0) {
+    showBanner("warn", "No pages have finished translating yet.");
+    stageMessage.textContent = "nothing to read";
+    prevButton.disabled = true;
+    nextButton.disabled = true;
+    return;
+  }
+
+  if (batch.failed > 0) {
+    showBanner("warn", batch.failed + " page(s) failed and are not shown.");
+  }
+
+  position = 0;
+  showPage();
+})();
+</script>
+</body>
+</html>

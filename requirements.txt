@@ -1,0 +1,50 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Only torch is version-pinned. Every other pin in earlier versions of this
+# file was chosen from what the original Kaggle notebook proved working in
+# 2026-09, but the Space's actual package index has moved since then:
+# paddlepaddle==2.6.1 (the notebook's version) no longer exists on PyPI at
+# all -- confirmed from a real failed build, "Could not find a version that
+# satisfies the requirement paddlepaddle==2.6.1 (from versions: 2.6.2,
+# 3.0.0b2, ..., 3.3.1)". That is a major-version jump, not a patch gap, so
+# hand-picking a replacement version blind is no safer than leaving it
+# unpinned. Letting pip resolve the current compatible set is now the more
+# reliable choice, not a shortcut.
+#
+# gradio itself is intentionally not listed. The Space's own build command
+# already appends "gradio[oauth,mcp]==6.26.0" matching sdk_version in
+# README.md, confirmed by reading the live build log -- listing it here
+# again would only be redundant, not safer.
+#
+# spaces IS listed, unlike gradio, even though the Space's build command
+# also auto-injects it (confirmed "spaces==0.51.3" in the same log). The
+# difference: that auto-injection only happens on HF's own build
+# infrastructure. app.py imports spaces directly (see the @spaces.GPU
+# probe function and its comment), so a plain "pip install -r
+# requirements.txt" on any other machine needs it listed to not crash on
+# import.
+spaces
+python-multipart
+pillow
+requests
+
+opencv-python-headless
+paddlepaddle
+paddleocr
+
+# manga-ocr pulls torch and transformers. the CPU wheel index above keeps
+# torch from dragging in the CUDA runtime, which is dead weight since this
+# code never imports the "spaces" package or uses @spaces.GPU, so it never
+# requests real GPU time even on ZeroGPU hardware.
+#
+# torch is the one package still hard-pinned, and for a reason unrelated to
+# what's available on PyPI: the Space's ZeroGPU platform rejects
+# requirements.txt at configuration time unless torch matches its own
+# allowlist, independent of pip's own resolver. 2.4.1 (an earlier pin) was
+# rejected with "Supported versions: 2.13.0, 2.12.1, 2.11.0, 2.10.0, 2.9.1,
+# 2.8.0". 2.8.0 is the lowest on that list and also the floor version HF's
+# general ZeroGPU documentation names as well-supported. This pin cannot be
+# safely removed the way the others were, since an unpinned torch could
+# resolve to a version outside that allowlist and fail configuration again.
+torch==2.8.0
+manga-ocr
