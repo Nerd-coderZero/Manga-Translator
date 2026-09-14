@@ -59,7 +59,7 @@ def translate_text_nemotron(text, source_lang="zh"):
     # models; we deliberately never read it for the pasted translation
     reasoning = message.get("reasoning_content")
     if reasoning:
-        print(f"  [nemotron reasoning, not used for output]: {reasoning[:200]}...")
+        print(f"  [nemotron reasoning, not used for output]: {len(reasoning)} chars, discarded")
 
     return message["content"].strip()
 
@@ -70,14 +70,14 @@ def translate_text(text, source_lang="zh", max_retries=5, base_wait_seconds=5):
         try:
             translated = translate_text_nemotron(text, source_lang)
             if translated:
-                print(f"[nemotron] {text} -> {translated}")
+                print(f"[nemotron] translated ok ({len(text)} chars source -> {len(translated)} chars output)")
                 return translated
         except Exception as e:
             wait_time = base_wait_seconds * (2 ** attempt)
-            print(f"Nemotron error for '{text}' (attempt {attempt + 1}/{max_retries}): {e}. "
+            print(f"Nemotron error ({len(text)}-char source, attempt {attempt + 1}/{max_retries}): {e}. "
                   f"retrying in {wait_time}s")
             time.sleep(wait_time)
             attempt += 1
 
-    print(f"Nemotron failed after {max_retries} attempts for '{text}'. leaving untranslated.")
+    print(f"Nemotron failed after {max_retries} attempts ({len(text)}-char source). leaving untranslated.")
     return ""

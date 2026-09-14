@@ -34,7 +34,7 @@ def erase_and_paste_text(image_path, merged_boxes, translations, output_path,
         if len(translated) > source_len * max_chars_per_source_char and len(translated) > 60:
             print(f"skipped box at {box['bounds']}: translated output implausibly long "
                   f"({len(translated)} chars for {source_len}-char source), likely not a "
-                  f"clean translation. left untranslated. source: {box['text'][:40]}")
+                  f"clean translation. left untranslated.")
             skipped_boxes.append({"bounds": box["bounds"], "text": box["text"], "reason": "implausible_length"})
             continue
 
@@ -121,8 +121,7 @@ def erase_and_paste_text(image_path, merged_boxes, translations, output_path,
             else:
                 print(f"skipped box at ({x1},{y1})-({x2},{y2}): translated text "
                       f"needs ~{expanded_area}px area, exceeds {max_area_multiplier}x "
-                      f"original area cap ({original_area}px). left untranslated. "
-                      f"source: {box['text'][:40]}")
+                      f"original area cap ({original_area}px). left untranslated.")
                 skipped_boxes.append({"bounds": box["bounds"], "text": box["text"], "reason": "too_large"})
                 continue
 
