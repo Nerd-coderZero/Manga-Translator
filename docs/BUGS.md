@@ -398,3 +398,93 @@ torch are not installed in the environment this fix was written in. The
 build log shows the Space resolves `manga-ocr==0.1.16`, not the
 notebook-verified `0.1.14`; whether its recognition behaves the same way
 is unconfirmed. See the updated UNV-8 in `docs/LIMITATIONS.md`.
+
+---
+
+## BUG-6 `is_garbage_text` let short OCR misreads through unflagged
+
+**Status:** fixed for the two reported failure shapes, with two accepted
+tradeoffs documented rather than silently shipped.
+
+### Symptom
+
+Reported by the separate evaluation-harness project run against this
+pipeline: short manga-ocr misreads on the Japanese path, for example `CSB`
+and `d00`, were passed on to translation instead of being caught as
+garbage first.
+
+### Root cause
+
+`is_garbage_text` (`backend/pipeline_core.py`) had two checks, both gated
+by a minimum length: a repeated-character-dominance check active only at
+`len(normalized) >= 8`, and a digit-majority check active only at
+`len(normalized) >= 6`. Nothing examined strings shorter than 6 characters
+at all. Confirmed directly by extracting and running the function before
+making any change: `is_garbage_text("CSB")` and `is_garbage_text("d00")`
+both returned `False`.
+
+### The fix
+
+Two narrower checks were added, active only at `len(stripped) <= 5`, using
+the original (not O-to-0-normalized) text -- the existing normalization
+exists for the digit-majority check and would misfire here, for example
+turning `"OK"` into `"0K"`:
+
+- a short token mixing letters with digits, where digits are not a small
+  minority (`len(digit_chars) >= len(letters)`), is flagged. This catches
+  `d00` and the same shape with other characters (`3d0`, `9x2`).
+- a short (3+ character) all-ASCII, all-consonant token with no digits is
+  flagged. This catches `CSB` and `XKQ`.
+
+Both checks were designed against, and verified against, the two reported
+strings plus a set of common short real words and abbreviations the fix
+must not flag (`OK`, `Hi`, `TV`, `Mr`, `SOS`, `ID`, and 20 more) to confirm
+the fix is not simply over-broad.
+
+### Two accepted tradeoffs, not fixed
+
+Both were found by testing, not predicted from reading the code, and both
+are left as-is rather than hidden:
+
+- **`3D` (and similarly shaped real alphanumeric tokens) is a false
+  positive.** The letter/digit-mix rule cannot distinguish a real short
+  alphanumeric token from a misread using digit-vs-letter ratio alone at
+  this length. Making the rule stricter (for example requiring 2+ digits)
+  would let `d00`-shaped misreads with only one digit back through, which
+  is the more common real failure shape reported. The tradeoff was chosen
+  deliberately in that direction.
+- **A digit-minority letter/digit mix, for example `O0O`, is not caught.**
+  This is the direct inverse of the `3D` case: the same rule that would
+  catch it would also flag `3D`-shaped real content, so it is left
+  unflagged rather than trading one false positive for another.
+- **The all-consonant rule will also flag genuine all-consonant short
+  tokens**, most plausibly manga sound effects (`SHH`, `TSK`, `GRR`).
+  Whether this actually collides with real sound-effect text has not been
+  tested, since no real sample of manga sound-effect OCR output was
+  available while writing this fix. `SOS` was checked and does not
+  collide, because `O` counts as a vowel here; three-letter effects
+  without any of `AEIOU` are the ones at risk.
+
+### Verification
+
+`tests/test_pipeline_core.py`, 40 checks, all passing: the two reported
+strings and two same-shape variants are flagged; 27 common short real
+words and abbreviations are not flagged; both documented tradeoffs above
+are asserted as-is (`3D` flagged, `O0O` not flagged) so a future change
+to either rule shows up as a deliberate test change, not a silent
+behaviour shift; the pre-existing longer-string checks (repeated-character
+at length >= 8, digit-majority at length >= 6) and the original edge cases
+(empty string, whitespace, over-length string) were re-run unchanged and
+still pass, confirming the fix only added a new branch and did not modify
+existing logic.
+
+Confirmed by reading the import graph (`grep` across `stub_pipeline.py`,
+`runner.py`, `main.py`, `batch_store.py`) that nothing in the stub-mode
+path imports `pipeline_core`, so the existing 90 stub-mode checks could
+not have been affected by this change and were not re-run for that reason.
+
+Not verified: this function's behaviour against real manga-ocr output.
+Everything above was checked against a hand-picked set of strings, not
+against real recognition results from actual pages, since manga-ocr and
+torch remain uninstalled in this environment. The evaluation-harness
+project that reported this gap is the intended source of that evidence.

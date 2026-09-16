@@ -116,6 +116,37 @@ def is_garbage_text(text, max_reasonable_length=80):
     if len(normalized) >= 6 and digit_count / len(normalized) > 0.5:
         return True
 
+    # the checks above only fire at length 6 or 8, so short misreads slip
+    # through untouched. lowering those floors would flag real short words
+    # too readily (a repeated-character or digit-majority rule is too blunt
+    # below that length), so short strings get two narrower checks instead,
+    # against the original (non O-to-0-normalized) text: the O/0 swap above
+    # exists for the digit-heavy check and would misfire here, for example
+    # turning "OK" into "0K" and making it look like a letter/digit mix.
+    if len(stripped) <= 5:
+        letters = [c for c in stripped if c.isalpha()]
+        digit_chars = [c for c in stripped if c.isdigit()]
+
+        # a short token mixing letters with digits, where digits are not a
+        # small minority, matches an OCR misread (for example "d00") far
+        # more often than real short text. real alphanumeric tokens this
+        # short do exist (for example "3D"), so this is a real, accepted
+        # tradeoff, not a risk-free rule.
+        if letters and digit_chars and len(digit_chars) >= len(letters):
+            return True
+
+        # an all-consonant ASCII token, three characters or longer, with no
+        # digits, matches OCR noise (for example "CSB") more often than real
+        # short words, which almost always contain a vowel. this will also
+        # flag genuine all-consonant tokens such as manga sound effects
+        # ("SHH", "TSK", "GRR") -- a known, accepted tradeoff pending a
+        # larger real sample to tune against, not something this pass
+        # verified against real sound-effect text. see docs/BUGS.md.
+        if len(stripped) >= 3 and letters and len(letters) == len(stripped):
+            if all(c.isascii() for c in stripped):
+                if not any(c in "AEIOUaeiou" for c in stripped):
+                    return True
+
     return False
 
 
