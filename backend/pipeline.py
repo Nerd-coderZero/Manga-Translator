@@ -25,7 +25,7 @@ def translate_page(input_path, output_path, source_lang="zh"):
 
     translations = []
     for b in merged_boxes:
-        if is_garbage_text(b["text"]):
+        if is_garbage_text(b["text"], check_length=False):
             translations.append("")
         else:
             translations.append(translate_text(b["text"], source_lang))

@@ -12,21 +12,28 @@ import runner
 
 # Job registry and result storage for translation work.
 #
-# Metadata lives in memory under a lock; rendered page images live on disk.
-# Two reasons for that split. Rendered manga pages are roughly 1-2 MB each
-# and a batch can be twenty of them, so holding them in the process is a
-# straightforward route to an out-of-memory kill on a small container.
-# Metadata is small, is read on every poll, and has no value once the
-# process dies, so persisting it would buy nothing.
+# Metadata lives in memory under a lock; rendered page images live on disk,
+# not in the process, so a large batch is a disk-space and TTL question, not
+# a memory one. Rendered manga pages are roughly 1-2 MB each, so a 100-page
+# batch is on the order of 100-200 MB on disk for up to DEFAULT_TTL_SECONDS,
+# after which evict_expired reclaims it. Metadata is small, is read on every
+# poll, and has no value once the process dies, so persisting it would buy
+# nothing.
 #
 # There is exactly one worker thread. The OCR models in ocr.py are
 # process-global singletons (_ocr_models, _manga_ocr_model) and are not
 # safe to call concurrently, and a single container has one model's worth
 # of memory to spend. Serialising here makes that a stated invariant of
-# the store rather than an accident of how requests happen to arrive.
+# the store rather than an accident of how requests happen to arrive. A
+# larger MAX_PAGES_PER_BATCH does not change this: pages still translate
+# strictly one at a time (see docs/LIMITATIONS.md LIM-3), so a bigger batch
+# is a proportionally longer wait, not a throughput gain.
 
 DEFAULT_TTL_SECONDS = 3 * 60 * 60
-MAX_PAGES_PER_BATCH = 40
+# raised from 40 to 100 after a real 90-page bulk translation run (Kaggle,
+# 2026-09) confirmed the pipeline handles a batch that size correctly; 100
+# leaves headroom above that real test rather than sitting right at its edge.
+MAX_PAGES_PER_BATCH = 100
 
 STATUS_PENDING = "pending"
 STATUS_RUNNING = "running"

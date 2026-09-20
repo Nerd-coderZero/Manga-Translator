@@ -96,20 +96,39 @@ def wrap_text_to_fit(draw, text, font, max_width):
     return lines
 
 
-def is_garbage_text(text, max_reasonable_length=80):
+_DOMINANCE_PUNCTUATION = set(".…！!？?~～。、，,")
+
+
+def is_garbage_text(text, max_reasonable_length=80, check_length=True):
     if not text or len(text.strip()) == 0:
         return True
 
     stripped = text.strip()
 
-    if len(stripped) > max_reasonable_length:
+    # the length cap is meant to catch a single nonsensical OCR read, not a
+    # legitimate multi-sentence block that merge_text_boxes correctly
+    # combined from several real fragments. callers working with already-
+    # merged text (pipeline.py's post-merge call) pass check_length=False.
+    if check_length and len(stripped) > max_reasonable_length:
         return True
 
     normalized = stripped.replace("O", "0").replace("〇", "0").replace("○", "0")
 
-    if len(normalized) >= 8:
-        most_common_char_count = max(normalized.count(c) for c in set(normalized))
-        if most_common_char_count / len(normalized) > 0.4:
+    # repeated-character dominance is meant to catch OCR noise like a string
+    # of one misread glyph, not real dialogue. manga dialogue frequently
+    # leans on repeated punctuation for stammering/hesitation ("...") or
+    # emphasis ("！！！", "~~"), which can dominate 40%+ of an otherwise
+    # coherent line and would wrongly flag it. only count non-punctuation
+    # (semantic) characters toward the ratio. a genuinely repeated semantic
+    # character (for example a mocking "哼哼哼哼哼哼哼" or a stray run of
+    # the same letter) still trips this and is not distinguishable here from
+    # real OCR noise repeating one character -- a known, accepted tradeoff,
+    # not verified against a larger real sample of onomatopoeia. see
+    # docs/BUGS.md.
+    dominance_chars = [c for c in normalized if c not in _DOMINANCE_PUNCTUATION and not c.isspace()]
+    if len(dominance_chars) >= 8:
+        most_common_char_count = max(dominance_chars.count(c) for c in set(dominance_chars))
+        if most_common_char_count / len(dominance_chars) > 0.4:
             return True
 
     digit_count = sum(1 for c in normalized if c.isdigit())

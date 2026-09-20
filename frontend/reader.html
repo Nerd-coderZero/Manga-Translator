@@ -13,6 +13,11 @@
     <div class="sub" id="batch-label">loading batch...</div>
   </div>
   <div class="actions" style="margin:0">
+    <div class="mode-switch" id="mode-switch">
+      <button data-mode="single" class="active">Single page</button>
+      <button data-mode="strip">Long strip</button>
+      <button data-mode="fullscreen">Fullscreen</button>
+    </div>
     <button class="secondary" id="back">Back to upload</button>
     <button class="secondary" id="download">Download zip</button>
   </div>
@@ -21,10 +26,14 @@
 <main>
   <div id="banner" class="banner hidden"></div>
 
-  <div class="reader-wrap">
+  <div class="thumb-rail hidden" id="thumb-rail"></div>
+
+  <div class="reader-wrap" id="single-view">
     <div>
       <div class="page-stage" id="stage">
         <div class="sub" id="stage-message">no page loaded</div>
+        <div class="click-zone left" id="zone-left" title="previous page"></div>
+        <div class="click-zone right" id="zone-right" title="next page"></div>
       </div>
       <div class="nav">
         <button class="secondary" id="prev">Previous</button>
@@ -41,7 +50,17 @@
       </div>
     </div>
   </div>
+
+  <div class="strip-wrap hidden" id="strip-view"></div>
 </main>
+
+<div class="reader-fullscreen hidden" id="fullscreen-view">
+  <button class="secondary fs-exit" id="fs-exit">Exit fullscreen</button>
+  <div class="click-zone left" id="fs-zone-left"></div>
+  <div class="click-zone right" id="fs-zone-right"></div>
+  <img id="fs-image" alt="">
+  <div class="fs-counter" id="fs-counter">- / -</div>
+</div>
 
 <script src="app.js"></script>
 <script>
@@ -57,9 +76,17 @@ const regionSummary = document.getElementById("region-summary");
 const batchLabel = document.getElementById("batch-label");
 const prevButton = document.getElementById("prev");
 const nextButton = document.getElementById("next");
+const thumbRail = document.getElementById("thumb-rail");
+const singleView = document.getElementById("single-view");
+const stripView = document.getElementById("strip-view");
+const fullscreenView = document.getElementById("fullscreen-view");
+const fsImage = document.getElementById("fs-image");
+const fsCounter = document.getElementById("fs-counter");
+const modeSwitch = document.getElementById("mode-switch");
 
 let readablePages = [];
 let position = 0;
+let mode = "single";
 const pageCache = new Map();
 
 function showBanner(kind, message) {
@@ -84,47 +111,119 @@ document.getElementById("download").addEventListener("click", function () {
 
 prevButton.addEventListener("click", function () { move(-1); });
 nextButton.addEventListener("click", function () { move(1); });
+document.getElementById("zone-left").addEventListener("click", function () { move(-1); });
+document.getElementById("zone-right").addEventListener("click", function () { move(1); });
+document.getElementById("fs-zone-left").addEventListener("click", function () { move(-1); });
+document.getElementById("fs-zone-right").addEventListener("click", function () { move(1); });
+document.getElementById("fs-exit").addEventListener("click", function () { setMode("single"); });
 
 document.addEventListener("keydown", function (event) {
+  if (mode === "fullscreen" && event.key === "Escape") { setMode("single"); return; }
+  if (mode === "strip") return; // arrow keys scroll the page naturally in strip mode
   if (event.key === "ArrowLeft") move(-1);
   if (event.key === "ArrowRight") move(1);
 });
+
+modeSwitch.addEventListener("click", function (event) {
+  const button = event.target.closest("button[data-mode]");
+  if (button) setMode(button.dataset.mode);
+});
+
+function setMode(next) {
+  mode = next;
+  for (const button of modeSwitch.querySelectorAll("button")) {
+    button.classList.toggle("active", button.dataset.mode === next);
+  }
+  singleView.classList.toggle("hidden", next !== "single");
+  stripView.classList.toggle("hidden", next !== "strip");
+  fullscreenView.classList.toggle("hidden", next !== "fullscreen");
+  thumbRail.classList.toggle("hidden", next === "fullscreen" || readablePages.length === 0);
+
+  if (next === "strip") {
+    renderStrip();
+  } else if (next === "fullscreen") {
+    showFullscreenPage();
+  } else {
+    showPage();
+  }
+}
 
 function move(delta) {
   const next = position + delta;
   if (next < 0 || next >= readablePages.length) return;
   position = next;
-  showPage();
+  if (mode === "fullscreen") {
+    showFullscreenPage();
+  } else {
+    showPage();
+  }
+}
+
+function jumpTo(index) {
+  if (index < 0 || index >= readablePages.length) return;
+  position = index;
+  if (mode === "strip") {
+    const el = document.getElementById("strip-page-" + index);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  } else if (mode === "fullscreen") {
+    showFullscreenPage();
+  } else {
+    showPage();
+  }
+  renderThumbRail();
+}
+
+async function loadPage(index) {
+  const page = readablePages[index];
+  let detail = pageCache.get(page.index);
+  if (!detail) {
+    detail = await getBatchPage(batchId, page.index);
+    pageCache.set(page.index, detail);
+  }
+  return detail;
 }
 
 async function showPage() {
-  const page = readablePages[position];
   counter.textContent = (position + 1) + " / " + readablePages.length;
   prevButton.disabled = position === 0;
   nextButton.disabled = position >= readablePages.length - 1;
 
-  let detail = pageCache.get(page.index);
-  if (!detail) {
-    stageMessage.textContent = "loading page " + (page.index + 1) + "...";
-    try {
-      detail = await getBatchPage(batchId, page.index);
-      pageCache.set(page.index, detail);
-    } catch (err) {
-      showBanner("error", "Could not load page " + (page.index + 1) + ": " + err.message);
-      return;
-    }
+  let detail;
+  try {
+    stageMessage.textContent = "loading page " + (position + 1) + "...";
+    detail = await loadPage(position);
+  } catch (err) {
+    showBanner("error", "Could not load page " + (position + 1) + ": " + err.message);
+    return;
   }
 
-  stage.innerHTML = "";
+  const existingImg = stage.querySelector("img");
+  if (existingImg) existingImg.remove();
+  stageMessage.classList.add("hidden");
+
   const img = document.createElement("img");
   img.alt = detail.filename;
   img.src = resolveImageUrl(detail.image_url);
   img.addEventListener("error", function () {
-    stage.innerHTML = '<div class="sub">image failed to load</div>';
+    stageMessage.textContent = "image failed to load";
+    stageMessage.classList.remove("hidden");
   });
-  stage.appendChild(img);
+  stage.insertBefore(img, stage.firstChild);
 
   renderRegions(detail);
+  renderThumbRail();
+  prefetch(position + 1);
+}
+
+async function showFullscreenPage() {
+  fsCounter.textContent = (position + 1) + " / " + readablePages.length;
+  try {
+    const detail = await loadPage(position);
+    fsImage.src = resolveImageUrl(detail.image_url);
+    fsImage.alt = detail.filename;
+  } catch (err) {
+    showBanner("error", "Could not load page " + (position + 1) + ": " + err.message);
+  }
   prefetch(position + 1);
 }
 
@@ -148,6 +247,89 @@ function renderRegions(detail) {
       '<div class="dst">' + escapeHtml(region.translation || "(not translated)") + "</div>" +
       '<div class="bounds">[' + bounds.join(", ") + "]</div>";
     regionsEl.appendChild(box);
+  });
+}
+
+function renderThumbRail() {
+  // the rail's own visibility is decided here, not only in setMode(), since
+  // init() renders the first page directly without going through setMode()
+  thumbRail.classList.toggle("hidden", mode === "fullscreen" || readablePages.length === 0);
+  if (readablePages.length === 0) return;
+  thumbRail.innerHTML = "";
+  readablePages.forEach(function (page, i) {
+    const thumb = document.createElement("div");
+    thumb.className = "thumb" + (i === position ? " current" : "");
+    thumb.innerHTML = "<span>" + (i + 1) + "</span>";
+    thumb.title = page.filename;
+    thumb.addEventListener("click", function () { jumpTo(i); });
+
+    const cached = pageCache.get(page.index);
+    if (cached) {
+      thumb.style.backgroundImage = "url(" + resolveImageUrl(cached.image_url) + ")";
+    } else {
+      thumb.classList.add("pending");
+      loadPage(i).then(function (detail) {
+        thumb.style.backgroundImage = "url(" + resolveImageUrl(detail.image_url) + ")";
+        thumb.classList.remove("pending");
+      }).catch(function () { /* thumbnail stays as a number-only placeholder */ });
+    }
+    thumbRail.appendChild(thumb);
+  });
+}
+
+// long-strip mode: every page stacked vertically, each image loaded lazily
+// via IntersectionObserver as it scrolls near the viewport, not all at once
+let stripObserver = null;
+
+function renderStrip() {
+  stripView.innerHTML = "";
+  if (stripObserver) stripObserver.disconnect();
+
+  readablePages.forEach(function (page, i) {
+    const wrap = document.createElement("div");
+    wrap.className = "strip-page";
+    wrap.id = "strip-page-" + i;
+    wrap.dataset.index = i;
+    wrap.textContent = "page " + (i + 1) + "...";
+    stripView.appendChild(wrap);
+  });
+
+  stripObserver = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (!entry.isIntersecting) return;
+      const el = entry.target;
+      const index = Number(el.dataset.index);
+      stripObserver.unobserve(el);
+      loadPage(index).then(function (detail) {
+        el.textContent = "";
+        const img = document.createElement("img");
+        img.alt = detail.filename;
+        img.src = resolveImageUrl(detail.image_url);
+        el.appendChild(img);
+        if (index === position) return;
+        // update the "current page" marker as the user scrolls, so the
+        // thumbnail rail and jump-to-page stay in sync with what is on screen
+      }).catch(function () {
+        el.textContent = "page " + (index + 1) + " failed to load";
+      });
+    });
+  }, { root: null, rootMargin: "600px 0px", threshold: 0.01 });
+
+  document.querySelectorAll(".strip-page").forEach(function (el) {
+    stripObserver.observe(el);
+  });
+
+  // track which page is most in view, for the thumbnail rail's highlight
+  const positionObserver = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (entry.isIntersecting && entry.intersectionRatio > 0.5) {
+        position = Number(entry.target.dataset.index);
+        renderThumbRail();
+      }
+    });
+  }, { root: null, threshold: 0.5 });
+  document.querySelectorAll(".strip-page").forEach(function (el) {
+    positionObserver.observe(el);
   });
 }
 

@@ -134,3 +134,110 @@ th { color: var(--muted); font-weight: 600; }
   .reader-wrap { grid-template-columns: 1fr; }
   .regions { max-height: none; }
 }
+
+/* reader: mode switcher */
+.mode-switch { display: flex; gap: 6px; }
+.mode-switch button {
+  padding: 7px 13px;
+  font-size: 13px;
+  background: var(--panel-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+}
+.mode-switch button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* reader: thumbnail rail */
+.thumb-rail {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 10px 4px;
+  margin-bottom: 14px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.thumb-rail .thumb {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 78px;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background: var(--panel-2) center/cover no-repeat;
+  cursor: pointer;
+  position: relative;
+  color: var(--muted);
+  font-size: 11px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 3px;
+}
+.thumb-rail .thumb.current { border-color: var(--accent); }
+.thumb-rail .thumb.pending { opacity: .4; }
+.thumb-rail .thumb span {
+  background: rgba(0,0,0,.55);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+/* reader: single-page mode (default), click zones over the stage to advance */
+.page-stage { position: relative; cursor: pointer; }
+.page-stage .click-zone { position: absolute; top: 0; bottom: 0; width: 35%; }
+.page-stage .click-zone.left { left: 0; }
+.page-stage .click-zone.right { right: 0; }
+
+/* reader: long-strip mode -- every page stacked, lazy-loaded on scroll */
+.strip-wrap { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.strip-page {
+  width: 100%;
+  max-width: 820px;
+  min-height: 200px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+.strip-page img { width: 100%; height: auto; display: block; border-radius: 6px; }
+
+/* reader: fullscreen mode */
+.reader-fullscreen {
+  position: fixed;
+  inset: 0;
+  background: #000;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.reader-fullscreen img { max-width: 100%; max-height: 100vh; object-fit: contain; }
+.reader-fullscreen .fs-exit {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  /* above the click-zones, which sit at z-index 101 -- otherwise the right
+     zone, positioned after this button in the DOM, wins ties and blocks
+     every click on Exit */
+  z-index: 102;
+}
+.reader-fullscreen .fs-counter {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #cfd6e6;
+  font-size: 13px;
+  background: rgba(0,0,0,.5);
+  padding: 4px 12px;
+  border-radius: 20px;
+}
+/* top strip is left clear of both click-zones so it never covers fs-exit,
+   regardless of z-index -- clicking to advance near the exit button would
+   be surprising anyway */
+.reader-fullscreen .click-zone { position: absolute; top: 56px; bottom: 0; width: 40%; z-index: 101; }
+.reader-fullscreen .click-zone.left { left: 0; }
+.reader-fullscreen .click-zone.right { right: 0; }

@@ -18,6 +18,11 @@ Translates Japanese and Chinese manga pages into English: detect the text
 regions, read them, translate each line, then erase the original text and
 paint the translation back into the same region.
 
+Live: https://huggingface.co/spaces/NerdCoderZero/manga-translator
+
+Stack: FastAPI, Gradio, PaddleOCR, manga-ocr, Nemotron-3-Super-120B via
+NVIDIA NIM, Pillow, deployed on Hugging Face Spaces (ZeroGPU).
+
 ## Pipeline
 
 ```

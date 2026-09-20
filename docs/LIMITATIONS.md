@@ -139,6 +139,13 @@ but batching the translation calls: one request carrying all of a page's
 lines instead of one request per line. That changes the prompt contract and
 has not been attempted.
 
+`MAX_PAGES_PER_BATCH` was raised from 40 to 100 (see `docs/DECISIONS.md`)
+on the strength of a real 90-page run completing correctly, but that
+change does not touch this limitation at all: pages still translate one at
+a time, so a 100-page batch is a proportionally longer wait, not faster
+throughput. The two were deliberately kept as separate, independent
+decisions rather than solved together.
+
 ## LIM-4 Uploads are not validated beyond extension and size
 
 `main.py` checks the file extension and the byte length. It does not verify
@@ -147,6 +154,35 @@ containing arbitrary data reaches the pipeline and fails there, surfacing
 as a 500 on the single endpoint or a failed page in a batch. The failure is
 contained and reported, but the error message is a decoder exception rather
 than something useful.
+
+## LIM-5 `is_garbage_text` cannot distinguish real repeated syllables from OCR noise
+
+**Status:** diagnosed against real data (see BUG-8 in `docs/BUGS.md`), not
+fixed. Parked because no safe rule was found, not because it was not
+attempted.
+
+After BUG-8 excluded punctuation from the repeated-character-dominance
+check, 2 of the original 42 real empty regions from a 90-page bulk run
+were still flagged: a repeated sound effect
+(`嗷嗷嗷嗷！！！咳！！！嗷嗷嗷！！`) and repeated mocking laughter
+(`他女儿~哼哼哼哼哼哼哼~谁知道呢`). Both are genuine manga content that
+deliberately repeats one real CJK character for emphasis. Structurally
+that is indistinguishable from a detector or recognizer misreading the
+same character repeatedly across a noisy region -- both produce a string
+dominated by one repeated, valid, real character.
+
+A curated whitelist of known onomatopoeia syllables (哼, 呼, 喝, 嗷, and
+so on) was considered and not implemented: writing one without a larger
+real sample of both genuine sound effects and genuine repeated-character
+OCR noise to validate against would be guessing, and a wrong guess in
+either direction is a new false positive or false negative added without
+evidence. This is deliberately left as an open limitation rather than
+"fixed" with an unverified heuristic.
+
+To pick this up: a larger real sample of both failure shapes -- confirmed
+onomatopoeia and confirmed repeated-character misreads, from real pipeline
+output -- would make a whitelist or a frequency-based rule verifiable
+rather than guessed.
 
 ---
 

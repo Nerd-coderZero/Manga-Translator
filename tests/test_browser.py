@@ -187,6 +187,52 @@ def run(page, pages, console_errors, failed_responses):
     )
     check("arrow key back navigation works", page.inner_text("#counter").strip() == "2 / 3")
 
+    # reader modes: single (default, already exercised above), long strip,
+    # and fullscreen. reload the reader on the same batch id directly rather
+    # than going through "Back to upload" -- that resets index.html's own
+    # in-memory batch state and disables #open-reader again, which is
+    # index.html's behaviour to test separately, not something this reader
+    # mode check should depend on.
+    reader_url = page.url
+    page.goto(reader_url, wait_until="networkidle")
+    page.wait_for_selector("#stage img", timeout=20000)
+
+    thumb_count = page.eval_on_selector_all(".thumb-rail .thumb", "els => els.length")
+    check("thumbnail rail shows one thumbnail per readable page", thumb_count == 3, str(thumb_count))
+    check("thumbnail rail is visible in single mode", page.is_visible("#thumb-rail"))
+
+    page.click('.thumb-rail .thumb:nth-child(3)')
+    page.wait_for_function(
+        "document.getElementById('counter').textContent.trim() === '3 / 3'", timeout=20000
+    )
+    check("clicking a thumbnail jumps to that page", page.inner_text("#counter").strip() == "3 / 3")
+
+    page.click('button[data-mode="strip"]')
+    page.wait_for_selector(".strip-page", timeout=10000)
+    check("strip mode hides the single-page view", page.is_hidden("#single-view"))
+    check("strip mode shows the strip view", page.is_visible("#strip-view"))
+    strip_page_count = page.eval_on_selector_all(".strip-page", "els => els.length")
+    check("strip mode renders one container per readable page", strip_page_count == 3, str(strip_page_count))
+    page.wait_for_function("document.querySelectorAll('.strip-page img').length > 0", timeout=10000)
+    strip_img_count = page.eval_on_selector_all(".strip-page img", "els => els.length")
+    check("strip mode lazy-loads at least the first page's image", strip_img_count > 0, str(strip_img_count))
+
+    page.click('button[data-mode="fullscreen"]')
+    page.wait_for_selector("#fullscreen-view:not(.hidden)", timeout=10000)
+    check("fullscreen mode shows the overlay", page.is_visible("#fullscreen-view"))
+    check("fullscreen mode hides the thumbnail rail", page.is_hidden("#thumb-rail"))
+    fs_src = page.eval_on_selector("#fs-image", "img => img.src")
+    check("fullscreen mode loads an image", bool(fs_src), fs_src)
+
+    # this click failing to register (timing out) is exactly the symptom of
+    # the fixed bug: the right click-zone used to sit above this button and
+    # swallow the click. reaching the check below is the real assertion.
+    page.click("#fs-exit")
+    page.wait_for_function(
+        "document.getElementById('fullscreen-view').classList.contains('hidden')", timeout=10000
+    )
+    check("exiting fullscreen returns to single-page mode", page.is_visible("#single-view"))
+
     page.click("#back")
     page.wait_for_url("**/index.html*", timeout=15000)
     check("back returns to the upload page", page.url.endswith("index.html") or "index.html" in page.url)

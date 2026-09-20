@@ -74,6 +74,61 @@ def run_checks():
         is_garbage_text("a" * 81) is True,
     )
 
+    # check_length=False (pipeline.py's post-merge call): a long but real,
+    # merge-produced block of Chinese dialogue must not be dropped just for
+    # being long. this reproduces the length-cap bug found via a real
+    # PaddleOCR merge of Chinese dialogue that exceeded the 80-char cap.
+    long_real_dialogue = (
+        "你不要再欺负她了，她已经很可怜了，你还要这样对她，"
+        "我真的看不下去了，求求你放过她吧，我求你了，"
+        "这样对一个女孩子实在是太过分了，希望你能够明白这一点，"
+        "拜托你了，我们都是朋友，不要再这样下去了"
+    )
+    assert len(long_real_dialogue) > 80, (
+        f"test string must exceed the 80-char cap to be meaningful, got {len(long_real_dialogue)}"
+    )
+    check(
+        "long real merged dialogue is NOT flagged when check_length=False",
+        is_garbage_text(long_real_dialogue, check_length=False) is False,
+    )
+    check(
+        "the same text IS flagged when check_length=True (default)",
+        is_garbage_text(long_real_dialogue) is True,
+    )
+
+    # reported gap: real manga dialogue relying on repeated punctuation for
+    # stammering ("...") or emphasis ("！！！", "~~") was being dropped by
+    # the repeated-character-dominance check, because punctuation counted
+    # toward the dominance ratio. these are real strings from a 90-page
+    # bulk run's "still empty" regions (source text only, not reproduced
+    # from any copyrighted work -- this is the manga's own OCR'd dialogue).
+    real_empties_now_rescued = [
+        "不会...让妓女大人...白踩着我排泄的...我...我会付钱的...唔唔...",
+        "是..我....这...这是这次的钱....",
+        "喝~喝~~喝~喝~~",
+        "!!!??!..妈..妈...",
+        "嗯...好...好",
+    ]
+    for s in real_empties_now_rescued:
+        check(
+            f"real dialogue {s[:20]!r}... no longer flagged by punctuation-dominance",
+            is_garbage_text(s, check_length=False) is False,
+        )
+
+    # documented, accepted remaining gap: a genuinely repeated semantic
+    # (non-punctuation) character -- real onomatopoeia/mockery in this
+    # manga's dialogue -- is structurally identical to OCR noise repeating
+    # one glyph and is still flagged. not fixed this pass; see the comment
+    # in pipeline_core.py and docs/BUGS.md.
+    check(
+        "'他女儿~哼哼哼哼哼哼哼~谁知道呢' (repeated real syllable) still flagged (accepted gap)",
+        is_garbage_text("他女儿~哼哼哼哼哼哼哼~谁知道呢", check_length=False) is True,
+    )
+
+    # the short-token checks (<=5 chars) are unaffected by the punctuation
+    # exclusion and continue to catch genuine short OCR misreads.
+    check("'达4' (real reported OCR misread) is still flagged", is_garbage_text("达4", check_length=False) is True)
+
     total = len(_results)
     passed = sum(1 for _, ok, _ in _results if ok)
     print(f"\n{passed}/{total} checks passed")

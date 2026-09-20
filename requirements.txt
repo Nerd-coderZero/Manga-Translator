@@ -28,6 +28,10 @@ python-multipart
 pillow
 requests
 
+# free, keyless fallback translator used when Nemotron is unavailable or
+# returns nothing usable (see backend/translation.py's TRANSLATION_PROVIDER)
+deep-translator
+
 opencv-python-headless
 paddlepaddle
 paddleocr

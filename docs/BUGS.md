@@ -488,3 +488,131 @@ Everything above was checked against a hand-picked set of strings, not
 against real recognition results from actual pages, since manga-ocr and
 torch remain uninstalled in this environment. The evaluation-harness
 project that reported this gap is the intended source of that evidence.
+
+---
+
+## BUG-7 `is_garbage_text`'s length cap dropped real merged Chinese dialogue
+
+**Status:** fixed and verified against real PaddleOCR output on a Kaggle
+GPU session, then applied to this repository.
+
+### Symptom
+
+On a dense Chinese manga page with several dialogue boxes, only one box
+translated; the rest were silently left untranslated with no error.
+
+### Root cause
+
+Diagnosed directly against the real pipeline, not by inspection alone. A
+raw detection + merge run on the affected page produced 44 raw OCR boxes,
+correctly merged by `merge_text_boxes` into 8 regions. Of those 8,
+`is_garbage_text` returned `True` for 3 -- but printing the actual text of
+those 3 showed real, coherent, multi-sentence Chinese dialogue, not noise.
+
+The cause was the unconditional length cap:
+`len(stripped) > max_reasonable_length` (80), with no way to distinguish
+"one long single OCR misread" from "several real dialogue fragments that
+`merge_text_boxes` correctly combined into one long region". Chinese
+dialogue is merged before this check runs (unlike Japanese, which filters
+per-fragment before merging); Chinese dialogue boxes that legitimately
+combine into more than 80 characters were being rejected outright.
+
+### The fix
+
+Added a `check_length` parameter (default `True`, preserving old
+behaviour everywhere it wasn't explicitly changed). `pipeline.py`'s single
+call site -- the post-merge call, the only place in the codebase that
+calls `is_garbage_text` on already-merged text -- now passes
+`check_length=False`. Every other potential caller keeps the length cap.
+
+### Verification
+
+Live-patched in the same Kaggle kernel that produced the original
+diagnosis (both `pipeline_core.is_garbage_text` and `pipeline.is_garbage_text`
+-- `pipeline.py` imports the name directly, so patching only the
+`pipeline_core` module object does not affect what `pipeline.translate_page`
+actually calls) and re-ran `runner.run_page` on the same real image. All 8
+regions came back `ok`, including the 3 previously-blank panels, with real
+Nemotron translations. Re-confirmed independently on a full 90-page real
+bulk run: `check_length=False` in place, dialogue that would previously
+have been dropped for length now translates correctly.
+
+Then applied to this repository (`backend/pipeline_core.py`,
+`backend/pipeline.py`) and re-verified with `tests/test_pipeline_core.py`:
+a synthetic 80+ character block of real-shaped dialogue is flagged with
+`check_length` at its default and not flagged with `check_length=False`.
+
+---
+
+## BUG-8 `is_garbage_text`'s repeated-character check counted punctuation
+
+**Status:** fixed for the punctuation-driven case, with one narrower,
+harder case left as a documented, accepted limitation rather than guessed
+at. See `docs/LIMITATIONS.md`.
+
+### Symptom
+
+Found while investigating the "still empty after BUG-7" regions from the
+same 90-page real bulk run: 42 regions had real, non-blank source text but
+no translation. `sent to fallback: 4, all 4 succeeded` on that run ruled
+out a translation-layer failure (zero real translation attempts failed
+anywhere in the batch), which meant the rejection had to be happening
+before any translator was ever called.
+
+### Root cause
+
+Confirmed by extracting the real source text of all 42 empty regions and
+running the current `is_garbage_text` against each one directly: 40 of 42
+were rejected by the repeated-character-dominance check
+(`most_common_char_count / len(normalized) > 0.4`, active at
+`len(normalized) >= 8`), 1 by the short letter/digit-mix check (correctly
+-- a genuine 2-character OCR fragment), and 1 was not flagged by any
+check in isolation.
+
+Of the 40 repeated-character rejections, the dominant character in all but
+2 was punctuation -- `.`, `！`, `~`, `？` -- not a repeated letter or CJK
+character. This manga's dialogue style relies heavily on `...`/`…` for
+stammering or hesitant speech and `！！！`/`~~` for emphasis; that
+punctuation alone was enough to push the dominance ratio over 0.4 on
+otherwise completely ordinary, coherent dialogue.
+
+### The fix
+
+Punctuation (`. … ！ ! ？ ? ~ ～ 。 、 ， ,`) is now excluded from the
+dominance ratio calculation -- only non-punctuation, non-whitespace
+characters count toward both the numerator and denominator. Verified
+against the real 42-string sample: 39 of 42 are no longer flagged.
+
+### What is not fixed
+
+The remaining 2 (a repeated sound effect, `嗷嗷嗷嗷！！！咳！！！嗷嗷嗷！！`,
+and repeated mocking laughter, `他女儿~哼哼哼哼哼哼哼~谁知道呢`) are still
+flagged even with punctuation excluded, because the dominant repeated
+character in both is a real, semantically meaningful CJK syllable used
+deliberately for emphasis -- structurally identical to genuine OCR noise
+repeating one misread glyph. No rule tried here can tell those apart
+without either a curated whitelist of known onomatopoeia syllables (not
+attempted -- risks being wrong in the other direction with no real data to
+validate it against) or deeper context this function does not have. See
+`docs/LIMITATIONS.md`.
+
+The one non-punctuation, non-short-token empty region from the original 42
+(`就这种水平了..哼...啊....脚底好黏...得真..真是没见过世面的..里面的钱能吓死你....`)
+was not flagged by any check once punctuation was excluded from the
+dominance ratio -- it was a false negative in the original diagnostic
+output, not a bug in the fixed function; not investigated further since it
+resolves itself under the fix.
+
+### Verification
+
+`tests/test_pipeline_core.py`: 5 real strings from the 42, covering both
+`...`-heavy and `！`/`？`/`~`-heavy dominance, are asserted no longer
+flagged; the 2 real-syllable cases are asserted still flagged, with the
+reason documented in the test itself; the pre-existing 40 checks from
+BUG-6 and the length-cap check from BUG-7 were re-run unchanged and all
+still pass (49/49 total), confirming the punctuation exclusion did not
+loosen or break either of the other two checks it runs alongside.
+
+Not verified: behaviour against a broader real sample beyond this one
+90-page run's 42 strings, and behaviour on Japanese dialogue (this run was
+Chinese-only).

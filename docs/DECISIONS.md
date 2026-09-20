@@ -307,6 +307,136 @@ in non-ZeroGPU environments." That was verified by running it directly in
 a sandbox with no GPU present, before trusting it not to break local
 development or the test suites.
 
+## Why translation has a free fallback and thinking is off for Nemotron
+
+Two changes to `translate_text_nemotron`'s request, made together and kept
+together because the second only became necessary once the first was
+tried: `enable_thinking` was switched to `False`, `temperature` to 0.3,
+`top_p` to 0.9, and `max_tokens` was capped at 512.
+
+The original call ran with thinking on and no token cap, which is
+correct for a model meant to reason before answering but is the wrong
+shape for this task: a real bulk run showed it adding meaningful latency
+per line, and worse, a fixed token budget with thinking on risks the
+model spending the entire budget on reasoning tokens and returning empty
+content, which reads identically to a hard failure downstream. Lower
+temperature and top_p were kept for the same reason a translation task
+generally wants them: less variance line to line, matching the terse,
+consistent register the system prompt already asks for.
+
+That alone does not solve the empty-content risk, only makes it less
+likely. `TRANSLATION_PROVIDER` (env var, default `auto`) adds a real
+fallback chain: Nemotron first, with retries capped at 2 in auto mode
+rather than the old 5, since a fallback existing makes patiently retrying
+a flaky line worse than handing it to a different translator; then
+`deep-translator`'s keyless `GoogleTranslator`; then its `MyMemoryTranslator`
+if Google also fails. `_is_valid()` treats a blank result or one that
+still contains CJK characters (the model echoing the source instead of
+translating it) as a miss, not just an exception, so a silent wrong
+answer gets the same fallback treatment as a hard error.
+
+Verified on a real 90-page Chinese bulk run: `sent to fallback: 4, google:
+0, mymemory: 4` -- every real Nemotron failure in that run was rescued by
+the fallback chain, and Google specifically returned nothing usable any
+of the 4 times it was tried, which is why MyMemory is second in the chain
+rather than the only fallback: a single free provider was not enough on
+its own, confirmed rather than assumed. `provider="fast"` (skip Nemotron
+entirely) and `provider="nemotron"` (old behaviour, no fallback) are kept
+as explicit options rather than removed, for bulk runs that want to
+avoid the NVIDIA rate limit entirely or that need the old patient-retry
+behaviour for comparison.
+
+Rejected alternative: raising `max_tokens` instead of turning thinking
+off, to give the model room for both reasoning and an answer. Not tried,
+because the latency cost of thinking is the more important problem for a
+bulk pipeline translating hundreds of short lines, and a much larger
+token cap makes the empty-content failure mode rarer but not impossible,
+where turning thinking off removes the mechanism entirely.
+
+## Why the batch cap was raised from 40 to 100, and why that isn't a throughput change
+
+`MAX_PAGES_PER_BATCH` was 40, chosen (per the "metadata in memory / images
+on disk" decision above) against a rough disk-space budget: rendered pages
+are 1-2 MB each, and a batch sits on disk for up to `DEFAULT_TTL_SECONDS`
+(3 hours) before `evict_expired` reclaims it. That reasoning was re-checked,
+not just raised on request: rendered pages still live on disk, not in the
+process, so a bigger cap is a disk-space and TTL question, not a memory
+one. A 90-page real Kaggle bulk run (see `docs/BUGS.md` BUG-7 and BUG-8)
+confirmed the pipeline itself handles a batch that size correctly, which
+is real evidence the old ceiling was conservative relative to genuine use.
+100 was chosen as headroom above that real test, not an arbitrary round
+number picked without one.
+
+This is explicitly not a throughput fix. LIM-3 (one worker thread, pages
+translate strictly serially) is unchanged by this: a 100-page batch is a
+longer wait, not a faster one. Raising the cap without also addressing
+LIM-3 was a deliberate, separate decision -- the two are independent
+constraints and conflating them would have meant either not raising the
+cap (leaving real bulk use worse off for no memory reason) or attempting a
+worker-pool change with much higher risk in the same pass as a one-line
+constant change. The pre-existing comment in `batch_store.py` that said
+"holding them in the process is... a route to an out-of-memory kill" was
+also corrected while touching this -- rendered images were never actually
+held in the process; only metadata is, and metadata scales with page
+*count*, not page bytes, so it was not the real constraint even at 40.
+
+## Why the reader has three modes instead of improving the single-page view alone
+
+The static frontend's reader was strictly one-page-at-a-time
+(Previous/Next, no overview), which was fine at a page count of a handful
+but did not scale once the batch cap went up: reaching page 40 of 100
+meant 39 clicks with no way to see where you were headed. Three real gaps
+existed, not one, so the fix addresses all three rather than picking the
+most obvious:
+
+- **No overview or jump-to-page.** Fixed with a thumbnail rail, present in
+  both single and long-strip modes, that loads each thumbnail lazily
+  (reusing whatever the page cache already has, or fetching on first
+  render) and lets a click jump straight to any page.
+- **No mode suited to fast, continuous reading of many pages in a row.**
+  Fixed with a long-strip mode -- every readable page stacked vertically,
+  each image loaded only when it scrolls near the viewport via
+  `IntersectionObserver` with a 600px lookahead margin, not all up front.
+  For a 100-page batch, loading every image eagerly would be exactly the
+  kind of unbounded-request-fan-out this project has been careful to
+  avoid elsewhere (see the batch/worker design); lazy loading keeps the
+  strip's real cost proportional to how far the user has actually
+  scrolled.
+- **No immersive, distraction-free page for actually reading the art.**
+  Fixed with a fullscreen mode -- the page fills the viewport, the
+  regions panel and thumbnail rail are hidden, and left/right click zones
+  plus arrow keys and Escape handle navigation and exit.
+
+Rejected alternative: replacing the one-page reader outright with a grid
+view showing every page at once, closer to the Gradio Space's gallery.
+Rejected because a manga reader's primary job is sequential reading in
+order, which a flat grid actively works against, and because the existing
+single-page mode with prefetch (see below) already serves that case well
+-- the actual gaps were the lack of an overview and the lack of a
+continuous-scroll option, which the thumbnail rail and strip mode solve
+directly without discarding what already worked.
+
+The single-page mode's existing prefetch-one-ahead behaviour, the
+Previous/Next buttons, and arrow-key navigation are unchanged; the
+regions panel, error banners, and the "N page(s) failed and are not
+shown" warning all continue to work identically across all three modes,
+since all three read from the same `readablePages`/`pageCache` state
+rather than each maintaining their own.
+
+Two real bugs were found and fixed while building this, both caught by
+running a real Playwright session against the real stub-backed API rather
+than by inspection: the thumbnail rail did not appear at all on initial
+load, because visibility was only ever toggled inside the mode-switch
+handler and `init()` renders the first page directly without going
+through it -- fixed by having the rail's own render function own its
+visibility. Separately, in fullscreen mode the right-side click-to-advance
+zone and the exit button shared the same z-index and sat in DOM order
+after it, so the zone intercepted every click intended for the exit
+button -- fixed by raising the button's z-index above the zones and
+clearing the top 56px of the click-zones so the two can never overlap
+regardless of z-index. Both are now covered by regression checks in
+`tests/test_browser.py` rather than only having been observed once.
+
 ## Why the reader prefetches one page ahead
 
 Manga is read page by page in order, so the next page is nearly always the
