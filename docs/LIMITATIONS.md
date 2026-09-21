@@ -146,6 +146,71 @@ a time, so a 100-page batch is a proportionally longer wait, not faster
 throughput. The two were deliberately kept as separate, independent
 decisions rather than solved together.
 
+## LIM-6 The deployed Space's UI has no jump-to-page, no working fullscreen, and no zoom
+
+**Status:** understood, not fixed. The reader built for this (single page /
+long strip / fullscreen modes, thumbnail jump-to-page -- see BUGS.md and
+the reader entry in DECISIONS.md) exists and is tested, but it is not
+reachable from the live Space at all.
+
+### Why
+
+The Hugging Face Space deploys as a Gradio SDK Space, which runs `app.py`
+directly (`demo.launch(...)`). `app.py` has no reference anywhere to
+`frontend/`, `main.py`, or `reader.html` -- confirmed by grep, zero
+matches. The reader and its three modes are served only by
+`backend/main.py`'s FastAPI static mount, which is a different way of
+running this project (`uvicorn main:app`) than what the Space actually
+runs. A user on the deployed Space has only ever seen `gr.Gallery`, which
+has no jump-to-page, no long-strip mode, and no dedicated fullscreen of
+this project's own design -- what looks like a stuck, unresponsive
+"fullscreen" is Gradio's own built-in image-preview lightbox
+(`gr.Gallery(preview=True)`), a third-party component this project does
+not control the behaviour of.
+
+### What was fixed instead, in this same investigation
+
+A real, separate, structural performance bug was found and fixed while
+diagnosing this: `app.py`'s `translate()` generator was rebuilding and
+re-sending the *entire* gallery (full-resolution PNGs) and the *entire*
+region table on every 0.5-second poll tick for the whole batch duration,
+regardless of whether anything had actually finished since the last tick.
+Confirmed by reading `gradio/components/gallery.py`'s `postprocess`
+directly: `gr.Gallery` and `gr.HTML` have no incremental-update path, so
+every yield with a real (non-`gr.update()`) value tears down and rebuilds
+the whole component client-side. At 40-100 pages this got worse as the
+batch progressed, matching the reported symptom ("lag once past 10
+images, still slow after done translating"). Three changes, all verified
+with a real 12-page batch through a real headless browser session:
+gallery images are now capped to a 1100px-long-edge JPEG thumbnail
+(`_thumbnail_path`, cached per source file) rather than the full 1-2 MB
+rendered PNG; the region table shows only the 5 most recently completed
+pages rather than growing without bound, with a note that every page's
+data is still in the downloadable zip; and the gallery/table are only
+rebuilt when the completed-page count has actually changed since the
+last tick, using `gr.update()` (a genuine no-op) otherwise. See BUGS.md
+and DECISIONS.md for the full write-up.
+
+This fixes the lag. It does not fix the missing jump-to-page or the
+Gradio lightbox getting stuck, because those are inherent to `gr.Gallery`
+as a component, not something tunable in `app.py`.
+
+### What a real fix would involve
+
+Either (a) reworking the Space to run FastAPI with Gradio mounted inside
+it (`gr.mount_gradio_app`), so the existing, tested `reader.html` becomes
+reachable on the deployed Space -- previously considered and rejected
+once already for being an unverified deployment mechanism (see "Why the
+Space uses the Gradio SDK and not Docker" in DECISIONS.md), so revisiting
+it would need to actually prove the mount works under ZeroGPU before
+relying on it, not assume it does this time; or (b) building genuine
+jump-to-page and a project-controlled fullscreen directly out of Gradio
+primitives (for example, a hidden `gr.Number` driven by JS thumbnail
+clicks, and a custom fullscreen overlay via `elem_id`-targeted CSS/JS
+rather than `gr.Gallery`'s own preview). Neither was attempted this pass;
+the user asked for whichever fixes the lag fastest and with least risk,
+and the lag was the one fixable within that constraint.
+
 ## LIM-4 Uploads are not validated beyond extension and size
 
 `main.py` checks the file extension and the byte length. It does not verify

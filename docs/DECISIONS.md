@@ -437,6 +437,91 @@ clearing the top 56px of the click-zones so the two can never overlap
 regardless of z-index. Both are now covered by regression checks in
 `tests/test_browser.py` rather than only having been observed once.
 
+## Why the Gradio gallery lag was fixed by throttling and thumbnailing, not by exposing the reader
+
+A user report of lag past roughly 10 completed images, and images loading
+slowly even after the batch finished, turned out to describe the deployed
+Hugging Face Space -- which runs `app.py` (Gradio SDK) directly, not
+`backend/main.py`'s FastAPI app. Confirmed by grep: `app.py` has zero
+references to `frontend/`, `reader.html`, or `main.py`. The reader with
+jump-to-page, long-strip and fullscreen modes, built and tested in the
+previous pass, is only reachable by running `uvicorn main:app`, a
+different way of running this project that the Space does not use. So the
+"fullscreen gets stuck" and "no jump-to-page" reports were actually
+describing `gr.Gallery(preview=True)`'s own built-in lightbox and its lack
+of a jump-to-page feature -- a third-party component's behaviour, not a
+bug in this codebase, and not something `app.py` controls.
+
+The lag, though, was real and local to this codebase: `translate()`'s
+polling loop rebuilt and re-sent the entire gallery and region table
+every 0.5s regardless of whether anything had changed, and `gr.Gallery`
+served the full-resolution rendered PNGs (1-2 MB each, per the earlier
+disk-budget decision) with no separate thumbnail. Confirmed by reading
+`gradio/components/gallery.py`'s `postprocess` directly: passing a file
+path sets `url=None`, so the frontend re-requests and re-renders every
+image in the list on every yield that carries a real value, since
+`gr.Gallery` has no incremental-update path. `gr.HTML` (the region table)
+has the same property. Both costs scale with completed-page count, which
+is exactly why the lag got worse as a batch progressed and was still
+present after the batch finished -- the last render is still the full,
+uncapped set.
+
+Two options existed: fix the Gradio gallery in place, or rework the Space
+to run FastAPI with Gradio mounted inside it (`gr.mount_gradio_app`) so
+the already-tested reader becomes reachable there too. The user asked for
+whichever solves the lag fastest with the least risk, explicitly not
+assuming the two options land at the same result. Mounting Gradio inside
+FastAPI was rejected for this pass for the same reason it was rejected
+once already (see "Why the Space uses the Gradio SDK and not Docker"
+above): it is a real architecture change on a platform (ZeroGPU) that has
+already broken deployment once in an unrelated way, and proving it works
+would need its own from-scratch verification pass, not a quick fix. Fixing
+the gallery in place is smaller, reuses a component already proven
+working on this exact Space, and directly addresses the lag, at the cost
+of leaving jump-to-page and a project-controlled fullscreen unavailable
+on the Space -- both remain possible later via either route and are
+recorded as LIM-6, not silently dropped.
+
+The fix itself, in `app.py`: `_thumbnail_path` generates a 1100px-long-edge
+JPEG per completed page (`Image.thumbnail` then save at quality 80), and
+`_gallery_items` points the gallery at the thumbnail rather than the
+original render. The thumbnail's existence on disk is its own cache --
+deliberately not a separate in-memory dict keyed by source path, since
+that would grow for the life of the process: batches get deleted (on TTL
+or explicitly) and their directories removed, but a dict entry pointing
+at a since-deleted path would not be, which is a slow leak on a
+long-running Space. The deterministic path plus one `os.path.exists`
+check costs one stat() call on every poll tick after the first, which is
+cheap enough not to need caching beyond that. 1100px was chosen, not a smaller
+"real" thumbnail size, because `gr.Gallery` has exactly one image slot
+per item shared between the grid and the click-to-zoom preview
+(confirmed from `gradio.data_classes.ImageData` -- one `path`/`url` pair,
+no separate thumbnail field), so whatever is served has to stay legible
+when a user zooms in to actually read translated dialogue, not just be
+small. `_region_table` caps at `REGION_TABLE_MAX_PAGES = 5`, the most
+recently completed pages, with an explicit note naming how many earlier
+pages are omitted and that the full data is in the downloadable zip --
+chosen over silently truncating, since a user who does not know the table
+is capped could mistake a shrunk view for missing translations. The
+polling loop only rebuilds the gallery and table when
+`completed + failed` has actually changed since the last tick, using
+`gr.update()` (a genuine client-side no-op, the same sentinel the
+original code already used for the zip-download column during polling)
+otherwise; the status textbox still updates every tick, since text is
+cheap and the live "`X / N pages processed`" feedback is worth keeping
+responsive.
+
+Verified with a real 12-page batch (past both the reported ~10-image lag
+threshold and the 5-page table cap) through a real headless browser
+session, not just by reading the diff: the gallery's actual `<img>` src
+resolves to a `.thumb1100.jpg` file rather than the original PNG, its
+decoded `naturalWidth` is below the 1100px cap (765px on the stub
+pipeline's test images), and the region table's visible text literally
+reads "Showing the 5 most recently completed page(s); 7 earlier page(s)
+omitted" for the 12-page batch. `tests/test_gradio.py` carries these as
+permanent regression checks (18/18 passing, up from 13, the original
+13 re-run unchanged and still green).
+
 ## Why the reader prefetches one page ahead
 
 Manga is read page by page in order, so the next page is nearly always the

@@ -123,11 +123,57 @@ def run(page, pages, console_errors):
     check("no uncaught javascript exceptions", len(page_errors) == 0, "; ".join(page_errors[:3]))
 
 
+def run_lag_fix_checks(page, pages, console_errors):
+    # separate batch, larger than REGION_TABLE_MAX_PAGES (5), to prove two
+    # real things rather than just the presence of code: the gallery serves
+    # downscaled thumbnails instead of the full-resolution rendered PNGs,
+    # and the region table stays capped rather than growing with every page.
+    page.goto(BASE, wait_until="networkidle")
+    page.wait_for_selector("#translate-button", timeout=30000)
+
+    file_input = page.locator("#files-input input[type='file']")
+    file_input.set_input_files(pages)
+    page.wait_for_timeout(1500)
+    page.click("#translate-button")
+
+    page.wait_for_function(
+        "(() => { const b = document.querySelector('#status-output textarea, #status-output input');"
+        f" return b && /of {len(pages)} pages translated/.test(b.value); }})()",
+        timeout=180000,
+    )
+
+    page.wait_for_selector("#gallery-output img", timeout=30000)
+    page.wait_for_timeout(500)
+
+    gallery_src = page.eval_on_selector("#gallery-output img", "el => el.src")
+    check("gallery image url points at a thumbnail file, not the original",
+          ".thumb" in gallery_src, gallery_src)
+
+    natural_width = page.eval_on_selector("#gallery-output img", "el => el.naturalWidth")
+    check("gallery thumbnail is downscaled below the 1100px cap",
+          0 < natural_width <= 1100, str(natural_width))
+
+    table_text = page.inner_text("#regions-output")
+    check(f"region table caps at 5 pages for a {len(pages)}-page batch",
+          "5 most recently completed" in table_text, table_text[:120])
+    check("region table names how many earlier pages were omitted",
+          f"{len(pages) - 5} earlier page(s) omitted" in table_text, table_text[:200])
+
+    page_errors = [e for e in console_errors if "favicon" not in e.lower()]
+    check("no uncaught javascript exceptions during the larger batch",
+          len(page_errors) == 0, "; ".join(page_errors[:3]))
+
+
 def main():
     tmp_dir = tempfile.mkdtemp(prefix="mt-gradio-")
     data_dir = os.path.join(tmp_dir, "data")
     os.makedirs(data_dir, exist_ok=True)
     pages = [make_page(os.path.join(tmp_dir, f"page{i}.png"), f"gradio test page {i}") for i in (1, 2, 3)]
+    # 12 pages: past the reported "lag starts around 10 images" threshold,
+    # and past REGION_TABLE_MAX_PAGES (5), so the cap actually gets exercised
+    larger_batch = [
+        make_page(os.path.join(tmp_dir, f"lagtest{i}.png"), f"lag test page {i}") for i in range(1, 13)
+    ]
 
     process = start_app(data_dir)
     try:
@@ -145,6 +191,7 @@ def main():
             page.on("pageerror", lambda exc: console_errors.append(str(exc)))
             try:
                 run(page, pages, console_errors)
+                run_lag_fix_checks(page, larger_batch, console_errors)
             finally:
                 context.close()
                 browser.close()

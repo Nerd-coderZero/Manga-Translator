@@ -5,6 +5,7 @@ import time
 
 import gradio as gr
 import spaces
+from PIL import Image
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "backend"))
 
@@ -13,6 +14,50 @@ from batch_store import STATUS_DONE, STATUS_FAILED, store
 
 LANG_CHOICES = [("Japanese", "ja"), ("Chinese", "zh")]
 POLL_INTERVAL_SECONDS = 0.5
+
+# rendered pages are full-resolution PNGs (1-2 MB, per docs/DECISIONS.md).
+# gr.Gallery has no separate thumbnail/full-size pair per item (confirmed
+# by reading gradio.data_classes.ImageData -- one path per item, used for
+# both the grid and the click-to-zoom preview), so this one size has to
+# serve both. 1100px keeps translated dialogue legible when a user clicks
+# to zoom, while still being a real cut from a 1-2 MB original: this is
+# the dominant fix for the reported lag, since gr.Gallery has no
+# incremental-update path and rebuilds the whole grid client-side on every
+# completed page, which gets expensive fast at full resolution past
+# roughly ten pages.
+THUMBNAIL_MAX_EDGE = 1100
+
+# region table rows are appended forever otherwise, and gr.HTML has no
+# incremental update path either -- the whole string is re-sent and
+# re-parsed on every yield. capping to the most recently completed pages
+# keeps that string bounded regardless of batch size; the full data for
+# every page is still in the downloadable zip once the batch finishes.
+REGION_TABLE_MAX_PAGES = 5
+
+def _thumbnail_path(image_path):
+    # the thumbnail path is deterministic from the source path, so
+    # existence on disk is the cache -- no separate in-memory dict needed.
+    # an in-memory cache keyed by image_path would grow for the whole life
+    # of the process (batches get deleted, on TTL or explicitly, but a
+    # dict entry pointing at a since-deleted path never would), which is
+    # exactly the kind of slow leak worth avoiding on a long-running Space.
+    # a completed page's rendered image never changes after translation,
+    # so the file-exists check below is sufficient reuse: on every
+    # subsequent poll tick this is one stat() call, not a re-resize.
+    thumb_path = image_path + f".thumb{THUMBNAIL_MAX_EDGE}.jpg"
+    if os.path.exists(thumb_path):
+        return thumb_path
+
+    try:
+        with Image.open(image_path) as img:
+            img = img.convert("RGB")
+            img.thumbnail((THUMBNAIL_MAX_EDGE, THUMBNAIL_MAX_EDGE))
+            img.save(thumb_path, "JPEG", quality=80)
+        return thumb_path
+    except Exception:
+        # a thumbnail failure must not break the gallery -- fall back to
+        # the original image rather than showing nothing for that page
+        return image_path
 
 # Entry point for the Hugging Face Gradio Space.
 #
@@ -69,7 +114,7 @@ def _gallery_items(batch):
             continue
         path = store.image_path(page.image_token)
         if path and os.path.exists(path):
-            items.append((path, f"{page.index + 1}. {page.filename}"))
+            items.append((_thumbnail_path(path), f"{page.index + 1}. {page.filename}"))
     return items
 
 
@@ -79,10 +124,20 @@ def _region_table(batch):
     # that combination failed to import during local verification. a table
     # of four string columns does not justify a pandas dependency on a
     # Space whose build has not been proven yet.
+    #
+    # capped to the most recently completed REGION_TABLE_MAX_PAGES pages,
+    # not all of them. gr.HTML has no incremental-update path -- the whole
+    # string is re-sent and re-parsed by the browser on every yield -- so
+    # an uncapped table grows without bound over a long batch and was part
+    # of the reported lag. every page's regions are still in the
+    # downloadable zip once the batch finishes; this table is a live
+    # preview, not the only place the data exists.
+    completed_pages = [p for p in batch.pages if p.status == STATUS_DONE]
+    shown_pages = completed_pages[-REGION_TABLE_MAX_PAGES:]
+    omitted = len(completed_pages) - len(shown_pages)
+
     rows = []
-    for page in batch.pages:
-        if page.status != STATUS_DONE:
-            continue
+    for page in shown_pages:
         for region in page.regions:
             rows.append((
                 page.index + 1,
@@ -103,7 +158,14 @@ def _region_table(batch):
         "</tr>"
         for index, source, translation, bounds in rows
     )
+    note = (
+        f"<p style='color:#888;font-size:0.85em'>Showing the {len(shown_pages)} most "
+        f"recently completed page(s); {omitted} earlier page(s) omitted from this "
+        "live preview. Every page's regions are included in the downloadable zip.</p>"
+        if omitted > 0 else ""
+    )
     return (
+        note +
         "<table style='width:100%;border-collapse:collapse' id='regions-table'>"
         "<thead><tr>"
         "<th style='text-align:left'>Page</th>"
@@ -132,7 +194,19 @@ def translate(files, source_lang):
 
     # generator: gradio re-renders the outputs on every yield, so progress
     # is driven by the same per-page status the HTTP API exposes rather
-    # than by a separate progress mechanism that could disagree with it
+    # than by a separate progress mechanism that could disagree with it.
+    #
+    # the status text is cheap (a short string) and updates every tick for
+    # live feedback. the gallery and region table are not cheap: gr.Gallery
+    # and gr.HTML both have no incremental-update path, so every yield with
+    # a real value rebuilds the whole component client-side and, in the
+    # gallery's case, re-requests every image in it. rebuilding those on
+    # every 0.5s tick regardless of whether a new page had actually finished
+    # was the reported lag -- most ticks find nothing new to show. gr.update()
+    # with no value is a genuine no-op on the frontend, unlike re-sending an
+    # unchanged list, so only building fresh values when finished actually
+    # increases is what removes the wasted rebuilds.
+    last_finished = -1
     while True:
         snapshot = batch.to_dict()
         finished = snapshot["completed"] + snapshot["failed"]
@@ -143,7 +217,16 @@ def translate(files, source_lang):
             + f" -- batch {snapshot['status']}"
             + _describe_failure(batch)
         )
-        yield status, _gallery_items(batch), _region_table(batch), gr.update()
+
+        if finished != last_finished:
+            gallery_update = _gallery_items(batch)
+            table_update = _region_table(batch)
+            last_finished = finished
+        else:
+            gallery_update = gr.update()
+            table_update = gr.update()
+
+        yield status, gallery_update, table_update, gr.update()
 
         if snapshot["status"] == STATUS_DONE:
             break
